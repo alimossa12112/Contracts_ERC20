@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+
+contract PerpetualFutures is Ownable {
+    enum Side { LONG, SHORT }
+
+    AggregatorV3Interface internal priceFeed;
+    IERC20 public collateralToken;
+    uint256 public leverage;
+    uint256 public marginRequirement;
+    uint256 public minPositionSize;
+    uint256 public maxPositionSize;
+
+    struct Position {
+        address trader;
+        uint256 margin;
+        Side side;
+        uint256 leverage;
+    }
+
+    mapping(address => Position) public positions;
+
+    event PositionOpened(address indexed trader, uint256 indexed margin, Side side);
+    event PositionClosed(address indexed trader, uint256 indexed profit);
+
+    constructor(
+        address _priceFeedAddress,
+        address _collateralToken,
+        uint256 _leverage,
+        uint256 _marginRequirement,
+        uint256 _minPositionSize,
+        uint256 _maxPositionSize
+    ) {
+        priceFeed = AggregatorV3Interface(_priceFeedAddress);
+        collateralToken = IERC20(_collateralToken);
+        leverage = _leverage;
+        marginRequirement = _marginRequirement;
+        minPositionSize = _minPositionSize;
+        maxPositionSize = _maxPositionSize;
+    }
+
+    function openPosition(Side side, uint256 margin, uint256 leverage) external {
+        require(side == Side.LONG || side == Side.SHORT, "Invalid side");
+        require(margin >= minPositionSize && margin <= maxPositionSize, "Invalid margin");
+        require(leverage <= leverage, "Exceeds max leverage");
+
+        uint256 latestPrice = getLatestPrice();
+        require(latestPrice > 0, "Invalid price feed");
+
+        uint256 marginRequirementInCollateral = (margin * leverage) / latestPrice;
+        require(collateralToken.balanceOf(msg.sender) >= marginRequirementInCollateral, "Insufficient collateral");
+
+        uint256 requiredMargin = (margin * marginRequirement) / 100;
+        require(margin >= requiredMargin, "Insufficient margin");
+
+        collateralToken.transferFrom(msg.sender, address(this), marginRequirementInCollateral);
+        positions[msg.sender] = Position(msg.sender, margin, side, leverage);
+
+        emit PositionOpened(msg.sender, margin, side);
+    }
+
+    function closePosition() external {
+        Position storage position = positions[msg.sender];
+        require(position.margin > 0, "No position exists");
+
+        uint256 latestPrice = getLatestPrice();
+        require(latestPrice > 0, "Invalid price feed");
+
+        uint256 profit;
+        if (position.side == Side.LONG) {
+            profit = ((latestPrice - position.margin) * position.leverage) / 1 ether;
+        } else {
+            profit = ((position.margin - latestPrice) * position.leverage) / 1 ether;
+        }
+
+        collateralToken.transfer(msg.sender, position.margin + profit);
+        delete positions[msg.sender];
+
+        emit PositionClosed(msg.sender, profit);
+    }
+
+    function getLatestPrice() public view returns (uint256) {
+        (,int price,,,) = priceFeed.latestRoundData();
+        return uint256(price);
+    }
+}
